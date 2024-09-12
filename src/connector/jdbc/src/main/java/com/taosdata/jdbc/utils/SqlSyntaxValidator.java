@@ -14,32 +14,45 @@
  *****************************************************************************/
 package com.taosdata.jdbc.utils;
 
-import com.taosdata.jdbc.TSDBConnection;
-import com.taosdata.jdbc.TSDBJNIConnector;
-
-import java.sql.Connection;
-import java.sql.SQLException;
-
 public class SqlSyntaxValidator {
 
-    private TSDBConnection tsdbConnection;
-    public SqlSyntaxValidator(Connection connection) {
-        this.tsdbConnection = (TSDBConnection) connection;
-    }
+    private static final String[] updateSQL = {"insert", "import", "create", "use", "alter", "drop", "set", "reset"};
+    private static final String[] querySQL = {"select", "show", "describe"};
 
-    public boolean validateSqlSyntax(String sql) throws SQLException {
+    private static final String[] databaseUnspecifiedShow = {"databases", "dnodes", "mnodes", "variables"};
 
-        boolean res = false;
-        if (tsdbConnection == null || tsdbConnection.isClosed()) {
-            throw new SQLException("invalid connection");
-        } else {
-            TSDBJNIConnector jniConnector  = tsdbConnection.getConnection();
-            if (jniConnector == null) {
-                throw new SQLException("jniConnector is null");
-            } else {
-                res = jniConnector.validateCreateTableSql(sql);
-            }
+    public static boolean isValidForExecuteUpdate(String sql) {
+        for (String prefix : updateSQL) {
+            if (sql.trim().toLowerCase().startsWith(prefix))
+                return true;
         }
-        return res;
+        return false;
     }
+
+    public static boolean isValidForExecuteQuery(String sql) {
+        for (String prefix : querySQL) {
+            if (sql.trim().toLowerCase().startsWith(prefix))
+                return true;
+        }
+        return false;
+    }
+
+    public static boolean isDatabaseUnspecifiedQuery(String sql) {
+        for (String databaseObj : databaseUnspecifiedShow) {
+            if (sql.trim().toLowerCase().matches("show\\s+" + databaseObj + ".*"))
+                return true;
+        }
+        return false;
+    }
+
+    public static boolean isDatabaseUnspecifiedUpdate(String sql) {
+        sql = sql.trim().toLowerCase();
+        return sql.matches("create\\s+database.*") || sql.startsWith("set") || sql.matches("drop\\s+database.*");
+    }
+
+    public static boolean isUseSql(String sql) {
+        return sql.trim().toLowerCase().startsWith("use");
+    }
+
+
 }

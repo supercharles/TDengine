@@ -13,213 +13,330 @@
  * along with this program. If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include <arpa/inet.h>
-#include <locale.h>
-#include <netinet/in.h>
-#include <pthread.h>
-#include <pwd.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <time.h>
-#include <unistd.h>
-
+#include "os.h"
 #include "taosmsg.h"
-#include "tcache.h"
-#include "tlog.h"
+#include "tref.h"
 #include "trpc.h"
-#include "tsdb.h"
-#include "tsocket.h"
-#include "tsystem.h"
-#include "ttime.h"
+#include "tnote.h"
 #include "ttimer.h"
-#include "tutil.h"
-
+#include "tsched.h"
+#include "tscLog.h"
 #include "tsclient.h"
+#include "tglobal.h"
+#include "tconfig.h"
+#include "ttimezone.h"
+#include "qScript.h"
+
 // global, not configurable
-void *  pVnodeConn;
-void *  pVMeterConn;
-void *  pTscMgmtConn;
-void *  pSlaveConn;
-void *  tscCacheHandle;
-uint8_t globalCode = 0;
-int     initialized = 0;
-int     slaveIndex;
-void *  tscTmr;
-void *  tscQhandle;
-void *  tscConnCache;
-int     tsInsertHeadSize;
+#define TSC_VAR_NOT_RELEASE 1
+#define TSC_VAR_RELEASED    0
 
-extern int            tscEmbedded;
-int                   tscNumOfThreads;
-static pthread_once_t tscinit = PTHREAD_ONCE_INIT;
+int32_t    sentinel = TSC_VAR_NOT_RELEASE;
 
-void taos_init_imp() {
-  char        temp[128];
-  struct stat dirstat;
-  SRpcInit    rpcInit;
+SHashObj  *tscVgroupMap;         // hash map to keep the vgroup info from mnode
+SHashObj  *tscTableMetaMap;      // table meta info buffer
+SCacheObj *tscVgroupListBuf;     // super table vgroup list information, only survives 5 seconds for each super table vgroup list
 
-  srand(taosGetTimestampSec());
+int32_t    tscObjRef = -1;
+void      *tscTmr;
+void      *tscQhandle;
+int32_t    tscRefId = -1;
+int32_t    tscNumOfObj = 0;         // number of sqlObj in current process.
+static void  *tscCheckDiskUsageTmr;
+void      *tscRpcCache;            // cache to keep rpc obj
+int32_t    tscNumOfThreads = 1;     // num of rpc threads
+char       tscLogFileName[12] = "taoslog";
+int        tscLogFileNum = 10;
 
-  if (tscEmbedded == 0) {
-    /*
-     * set localIp = 0
-     * means unset tsLocalIp in client
-     * except read from config file
-     */
-    strcpy(tsLocalIp, "0.0.0.0");
+static pthread_mutex_t rpcObjMutex; // mutex to protect open the rpc obj concurrently
+static pthread_once_t  tscinit = PTHREAD_ONCE_INIT;
 
-    // Read global configuration.
-    tsReadGlobalLogConfig();
+// pthread_once can not return result code, so result code is set to a global variable.
+static volatile int tscInitRes = 0;
 
-    // For log directory
-    if (stat(logDir, &dirstat) < 0) mkdir(logDir, 0755);
-
-    sprintf(temp, "%s/taoslog", logDir);
-    if (taosInitLog(temp, tsNumOfLogLines, 10) < 0) {
-      printf("failed to open log file:%s", temp);
-    }
-
-    tsReadGlobalConfig();
-    tsPrintGlobalConfig();
-
-    tscTrace("starting to initialize TAOS client ...");
-    tscTrace("Local IP address is:%s", tsLocalIp);
-  }
-
-  tscInitMsgs();
-  slaveIndex = rand();
-  int queueSize = tsMaxVnodeConnections + tsMaxMeterConnections + tsMaxMgmtConnections + tsMaxMgmtConnections;
-
-  if (tscEmbedded == 0) {
-    tscNumOfThreads = tsNumOfCores * tsNumOfThreadsPerCore / 2.0;
-  } else {
-    tscNumOfThreads = tsNumOfCores * tsNumOfThreadsPerCore / 4.0;
-  }
-
-  if (tscNumOfThreads < 2) tscNumOfThreads = 2;
-
-  tscQhandle = taosInitScheduler(queueSize, tscNumOfThreads, "tsc");
-
-  memset(&rpcInit, 0, sizeof(rpcInit));
-  rpcInit.localIp = tsLocalIp;
-  rpcInit.localPort = 0;
-  rpcInit.label = "TSC-vnode";
-  rpcInit.numOfThreads = tscNumOfThreads;
-  rpcInit.fp = tscProcessMsgFromServer;
-  rpcInit.bits = 20;
-  rpcInit.numOfChanns = tscNumOfThreads;
-  rpcInit.sessionsPerChann = tsMaxVnodeConnections / tscNumOfThreads;
-  rpcInit.idMgmt = TAOS_ID_FREE;
-  rpcInit.noFree = 1;
-  rpcInit.connType = TAOS_CONN_UDP;
-  rpcInit.qhandle = tscQhandle;
-  pVnodeConn = taosOpenRpc(&rpcInit);
-  if (pVnodeConn == NULL) {
-    tscError("failed to init connection to vnode");
-    return;
-  }
-
-  for (int i = 0; i < tscNumOfThreads; ++i) taosOpenRpcChann(pVnodeConn, i, rpcInit.sessionsPerChann);
-
-  memset(&rpcInit, 0, sizeof(rpcInit));
-  rpcInit.localIp = tsLocalIp;
-  rpcInit.localPort = 0;
-  rpcInit.label = "TSC-mgmt";
-  rpcInit.numOfThreads = 1;
-  rpcInit.fp = tscProcessMsgFromServer;
-  rpcInit.bits = 20;
-  rpcInit.numOfChanns = 1;
-  rpcInit.sessionsPerChann = tsMaxMgmtConnections;
-  rpcInit.idMgmt = TAOS_ID_FREE;
-  rpcInit.noFree = 1;
-  rpcInit.connType = TAOS_CONN_UDP;
-  rpcInit.qhandle = tscQhandle;
-  pTscMgmtConn = taosOpenRpc(&rpcInit);
-  if (pTscMgmtConn == NULL) {
-    tscError("failed to init connection to mgmt");
-    return;
-  }
-
-  tscTmr = taosTmrInit(tsMaxMgmtConnections * 2, 200, 60000, "TSC");
-
-  int64_t refreshTime = tsMetricMetaKeepTimer < tsMeterMetaKeepTimer ? tsMetricMetaKeepTimer : tsMeterMetaKeepTimer;
-  refreshTime = refreshTime > 2 ? 2 : refreshTime;
-  refreshTime = refreshTime < 1 ? 1 : refreshTime;
-
-  if (tscCacheHandle == NULL) tscCacheHandle = taosInitDataCache(tsMaxMeterConnections / 2, tscTmr, refreshTime);
-
-  tscConnCache = taosOpenConnCache(tsMaxMeterConnections * 2, taosCloseRpcConn, tscTmr, tsShellActivityTimer * 1000);
-
-  initialized = 1;
-  tscTrace("taos client is initialized successfully");
-  tsInsertHeadSize = tsRpcHeadSize + sizeof(SShellSubmitMsg);
+void tscCheckDiskUsage(void *UNUSED_PARAM(para), void *UNUSED_PARAM(param)) {
+  taosGetDisk();
+  taosTmrReset(tscCheckDiskUsage, 20 * 1000, NULL, tscTmr, &tscCheckDiskUsageTmr);
 }
 
-void taos_init() { pthread_once(&tscinit, taos_init_imp); }
+void tscFreeRpcObj(void *param) {
+  assert(param);
+  SRpcObj *pRpcObj = (SRpcObj *)(param);
+  tscDebug("free rpcObj:%p and free pDnodeConn: %p", pRpcObj, pRpcObj->pDnodeConn);
+  rpcClose(pRpcObj->pDnodeConn);
+}
 
-int taos_options(TSDB_OPTION option, const void *arg, ...) {
-  char *         pStr = NULL;
-  SGlobalConfig *cfg_configDir = tsGetConfigOption("configDir");
-  SGlobalConfig *cfg_activetimer = tsGetConfigOption("shellActivityTimer");
-  SGlobalConfig *cfg_locale = tsGetConfigOption("locale");
-  SGlobalConfig *cfg_charset = tsGetConfigOption("charset");
-  SGlobalConfig *cfg_timezone = tsGetConfigOption("timezone");
+void tscReleaseRpc(void *param)  {
+  if (param == NULL) {
+    return;
+  }
+
+  taosCacheRelease(tscRpcCache, (void *)&param, false);
+}
+
+int32_t tscAcquireRpc(const char *key, const char *user, const char *secretEncrypt, void **ppRpcObj) {
+  pthread_mutex_lock(&rpcObjMutex);
+
+  SRpcObj *pRpcObj = (SRpcObj *)taosCacheAcquireByKey(tscRpcCache, key, strlen(key));
+  if (pRpcObj != NULL) {
+    *ppRpcObj = pRpcObj;   
+    pthread_mutex_unlock(&rpcObjMutex);
+    return 0;
+  }
+
+  SRpcInit tsc_rpcInit;
+  memset(&tsc_rpcInit, 0, sizeof(tsc_rpcInit));
+  tsc_rpcInit.localPort = 0;
+  tsc_rpcInit.label = "TSC";
+  tsc_rpcInit.numOfThreads = tscNumOfThreads;    
+  tsc_rpcInit.cfp = tscProcessMsgFromServer;
+  tsc_rpcInit.sessions = tsMaxConnections;
+  tsc_rpcInit.connType = TAOS_CONN_CLIENT;
+  tsc_rpcInit.user = (char *)user;
+  tsc_rpcInit.idleTime = tsShellActivityTimer * 1000; 
+  tsc_rpcInit.ckey = "key"; 
+  tsc_rpcInit.spi = 1; 
+  tsc_rpcInit.secret = (char *)secretEncrypt;
+
+  SRpcObj rpcObj;
+  memset(&rpcObj, 0, sizeof(rpcObj));
+  strncpy(rpcObj.key, key, strlen(key));
+  rpcObj.pDnodeConn = rpcOpen(&tsc_rpcInit);
+  if (rpcObj.pDnodeConn == NULL) {
+    pthread_mutex_unlock(&rpcObjMutex);
+    tscError("failed to init connection to server");
+    return -1;
+  }
+
+  pRpcObj = taosCachePut(tscRpcCache, rpcObj.key, strlen(rpcObj.key), &rpcObj, sizeof(rpcObj), 1000*5);   
+  if (pRpcObj == NULL) {
+    rpcClose(rpcObj.pDnodeConn);
+    pthread_mutex_unlock(&rpcObjMutex);
+    return -1;
+  } 
+
+  *ppRpcObj  = pRpcObj;
+  pthread_mutex_unlock(&rpcObjMutex);
+  return 0;
+}
+
+void taos_init_imp(void) {
+  char temp[128] = {0};
+
+  // In the APIs of other program language, taos_cleanup is not available yet.
+  // So, to make sure taos_cleanup will be invoked to clean up the allocated resource to suppress the valgrind warning.
+  atexit(taos_cleanup);
+  
+  errno = TSDB_CODE_SUCCESS;
+  srand(taosGetTimestampSec());
+  deltaToUtcInitOnce();
+
+  if (tscEmbedded == 0) {
+
+    // Read global configuration.
+    taosInitGlobalCfg();
+    taosReadGlobalLogCfg();
+
+    // For log directory
+    if (mkdir(tsLogDir, 0755) != 0 && errno != EEXIST) {
+      printf("failed to create log dir:%s\n", tsLogDir);
+    }
+
+    sprintf(temp, "%s/%s", tsLogDir, tscLogFileName);
+    if (taosInitLog(temp, tsNumOfLogLines, tscLogFileNum) < 0) {
+      printf("failed to open log file in directory:%s\n", tsLogDir);
+    }
+
+    taosReadGlobalCfg();
+    if (taosCheckGlobalCfg()) {
+      tscInitRes = -1;
+      return;
+    }
+    
+    taosInitNotes();
+
+    rpcInit();
+
+    scriptEnvPoolInit();
+    tscDebug("starting to initialize client ...");
+    tscDebug("Local End Point is:%s", tsLocalEp);
+  }
+
+  taosSetCoreDump();
+  tscInitMsgsFp();
+
+  double factor = (tscEmbedded == 0)? 2.0:4.0;
+  tscNumOfThreads = (int)(tsNumOfCores * tsNumOfThreadsPerCore / factor);
+  if (tscNumOfThreads < 2) {
+    tscNumOfThreads = 2;
+  }
+
+  int32_t queueSize = tsMaxConnections*2;
+  tscQhandle = taosInitScheduler(queueSize, tscNumOfThreads, "tsc");
+  if (NULL == tscQhandle) {
+    tscError("failed to init task queue");
+    tscInitRes = -1;
+    return;
+  }
+
+  tscDebug("client task queue is initialized, numOfWorkers: %d", tscNumOfThreads);
+
+  tscTmr = taosTmrInit(tsMaxConnections * 2, 200, 60000, "TSC");
+  if(0 == tscEmbedded){
+    taosTmrReset(tscCheckDiskUsage, 20 * 1000, NULL, tscTmr, &tscCheckDiskUsageTmr);      
+  }
+
+  if (tscTableMetaMap == NULL) {
+    tscObjRef        = taosOpenRef(40960, tscFreeRegisteredSqlObj);
+    tscVgroupMap     = taosHashInit(256, taosGetDefaultHashFunction(TSDB_DATA_TYPE_INT), true, HASH_ENTRY_LOCK);
+    tscTableMetaMap  = taosHashInit(1024, taosGetDefaultHashFunction(TSDB_DATA_TYPE_BINARY), true, HASH_ENTRY_LOCK);
+    tscVgroupListBuf = taosCacheInit(TSDB_DATA_TYPE_BINARY, 5, false, NULL, "stable-vgroup-list");
+    tscDebug("TableMeta:%p, vgroup:%p is initialized", tscTableMetaMap, tscVgroupMap);
+  }
+   
+  int refreshTime = 5;
+  tscRpcCache = taosCacheInit(TSDB_DATA_TYPE_BINARY, refreshTime, true, tscFreeRpcObj, "rpcObj");
+  pthread_mutex_init(&rpcObjMutex, NULL);
+
+  tscRefId = taosOpenRef(200, tscCloseTscObj);
+
+  tscDebug("client is initialized successfully");
+}
+
+int taos_init() {
+  pthread_once(&tscinit, taos_init_imp);
+  return tscInitRes;
+}
+
+// this function may be called by user or system, or by both simultaneously.
+void taos_cleanup(void) {
+  tscDebug("start to cleanup client environment");
+
+  if (atomic_val_compare_exchange_32(&sentinel, TSC_VAR_NOT_RELEASE, TSC_VAR_RELEASED) != TSC_VAR_NOT_RELEASE) {
+    return;
+  }
+
+  if (tscEmbedded == 0) {
+    scriptEnvPoolCleanup();
+  }
+
+  taosHashCleanup(tscTableMetaMap);
+  tscTableMetaMap = NULL;
+
+  taosHashCleanup(tscVgroupMap);
+  tscVgroupMap = NULL;
+
+  int32_t id = tscObjRef;
+  tscObjRef = -1;
+  taosCloseRef(id);
+
+  void* p = tscQhandle;
+  tscQhandle = NULL;
+  taosCleanUpScheduler(p);
+
+  id = tscRefId;
+  tscRefId = -1;
+  taosCloseRef(id);
+
+  taosCleanupKeywordsTable();
+
+  p = tscRpcCache; 
+  tscRpcCache = NULL;
+  
+  if (p != NULL) {
+    taosCacheCleanup(p); 
+    pthread_mutex_destroy(&rpcObjMutex);
+  }
+
+  taosCacheCleanup(tscVgroupListBuf);
+  tscVgroupListBuf = NULL;
+
+  if (tscEmbedded == 0) {
+    rpcCleanup();
+    taosCloseLog();
+  };
+
+  p = tscTmr;
+  tscTmr = NULL;
+  taosTmrCleanUp(p);
+}
+
+static int taos_options_imp(TSDB_OPTION option, const char *pStr) {
+  SGlobalCfg *cfg = NULL;
 
   switch (option) {
     case TSDB_OPTION_CONFIGDIR:
-      pStr = (char *)arg;
-      if (cfg_configDir && cfg_configDir->cfgStatus <= TSDB_CFG_CSTATUS_OPTION) {
-        strncpy(configDir, pStr, TSDB_FILENAME_LEN);
-        cfg_configDir->cfgStatus = TSDB_CFG_CSTATUS_OPTION;
-        tscPrint("set config file directory:%s", pStr);
+      cfg = taosGetConfigOption("configDir");
+      assert(cfg != NULL);
+    
+      if (cfg->cfgStatus <= TAOS_CFG_CSTATUS_OPTION) {
+        tstrncpy(configDir, pStr, TSDB_FILENAME_LEN);
+        cfg->cfgStatus = TAOS_CFG_CSTATUS_OPTION;
+        tscInfo("set config file directory:%s", pStr);
       } else {
-        tscWarn("config option:%s, input value:%s, is configured by %s, use %s", cfg_configDir->option, pStr,
-                tsCfgStatusStr[cfg_configDir->cfgStatus], (char *)cfg_configDir->ptr);
+        tscWarn("config option:%s, input value:%s, is configured by %s, use %s", cfg->option, pStr,
+                tsCfgStatusStr[cfg->cfgStatus], (char *)cfg->ptr);
       }
       break;
+
     case TSDB_OPTION_SHELL_ACTIVITY_TIMER:
-      if (cfg_activetimer && cfg_activetimer->cfgStatus <= TSDB_CFG_CSTATUS_OPTION) {
-        tsShellActivityTimer = atoi((char *)arg);
+      cfg = taosGetConfigOption("shellActivityTimer");
+      assert(cfg != NULL);
+    
+      if (cfg->cfgStatus <= TAOS_CFG_CSTATUS_OPTION) {
+        tsShellActivityTimer = atoi(pStr);
         if (tsShellActivityTimer < 1) tsShellActivityTimer = 1;
         if (tsShellActivityTimer > 3600) tsShellActivityTimer = 3600;
-        cfg_activetimer->cfgStatus = TSDB_CFG_CSTATUS_OPTION;
-        tscPrint("set shellActivityTimer:%d", tsShellActivityTimer);
+        cfg->cfgStatus = TAOS_CFG_CSTATUS_OPTION;
+        tscInfo("set shellActivityTimer:%d", tsShellActivityTimer);
       } else {
-        tscWarn("config option:%s, input value:%s, is configured by %s, use %d", cfg_activetimer->option, pStr,
-                tsCfgStatusStr[cfg_activetimer->cfgStatus], (int32_t *)cfg_activetimer->ptr);
+        tscWarn("config option:%s, input value:%s, is configured by %s, use %d", cfg->option, pStr,
+                tsCfgStatusStr[cfg->cfgStatus], *(int32_t *)cfg->ptr);
       }
       break;
-    case TSDB_OPTION_LOCALE: {  // set locale
-      pStr = (char *)arg;
 
+    case TSDB_OPTION_LOCALE: {  // set locale
+      cfg = taosGetConfigOption("locale");
+      assert(cfg != NULL);
+  
       size_t len = strlen(pStr);
       if (len == 0 || len > TSDB_LOCALE_LEN) {
-        tscPrint("Invalid locale:%s, use default", pStr);
+        tscInfo("Invalid locale:%s, use default", pStr);
         return -1;
       }
 
-      if (cfg_locale && cfg_charset && cfg_locale->cfgStatus <= TSDB_CFG_CSTATUS_OPTION) {
+      if (cfg->cfgStatus <= TAOS_CFG_CSTATUS_OPTION) {
         char sep = '.';
-        char oldLocale[64] = {0};
-        strncpy(oldLocale, tsLocale, sizeof(oldLocale) / sizeof(oldLocale[0]));
 
-        char *locale = setlocale(LC_CTYPE, pStr);
+        if (strlen(tsLocale) == 0) { // locale does not set yet
+          char* defaultLocale = setlocale(LC_CTYPE, "");
 
-        if (locale != NULL) {
-          tscPrint("locale set, prev locale:%s, new locale:%s", oldLocale, locale);
-          cfg_locale->cfgStatus = TSDB_CFG_CSTATUS_OPTION;
-        } else {
-          /* set the user-specified localed failed, use default LC_CTYPE as
-           * current locale */
-          locale = setlocale(LC_CTYPE, oldLocale);
-          tscPrint("failed to set locale:%s, restore locale:%s", pStr, oldLocale);
+          // The locale of the current OS does not be set correctly, so the default locale cannot be acquired.
+          // The launch of current system will abort soon.
+          if (defaultLocale == NULL) {
+            tscError("failed to get default locale, please set the correct locale in current OS");
+            return -1;
+          }
+
+          tstrncpy(tsLocale, defaultLocale, TSDB_LOCALE_LEN);
         }
 
-        strncpy(tsLocale, locale, sizeof(tsLocale) / sizeof(tsLocale[0]));
+        // set the user specified locale
+        char *locale = setlocale(LC_CTYPE, pStr);
+
+        if (locale != NULL) { // failed to set the user specified locale
+          tscInfo("locale set, prev locale:%s, new locale:%s", tsLocale, locale);
+          cfg->cfgStatus = TAOS_CFG_CSTATUS_OPTION;
+        } else { // set the user specified locale failed, use default LC_CTYPE as current locale
+          locale = setlocale(LC_CTYPE, tsLocale);
+          if (locale == NULL) {
+            tscError("failed to set locale:%s failed, neither default LC_CTYPE: %s", pStr, tsLocale);
+            return -1;
+          }
+          tscInfo("failed to set locale:%s, current locale:%s", pStr, tsLocale);
+        }
+
+        tstrncpy(tsLocale, locale, TSDB_LOCALE_LEN);
 
         char *charset = strrchr(tsLocale, sep);
         if (charset != NULL) {
@@ -228,69 +345,98 @@ int taos_options(TSDB_OPTION option, const void *arg, ...) {
           charset = taosCharsetReplace(charset);
 
           if (taosValidateEncodec(charset)) {
-            tscPrint("charset changed from %s to %s", tsCharset, charset);
-            strncpy(tsCharset, charset, tListLen(tsCharset));
-            cfg_charset->cfgStatus = TSDB_CFG_CSTATUS_OPTION;
-            ;
+            if (strlen(tsCharset) == 0) {
+              tscInfo("charset set:%s", charset);
+            } else {
+              tscInfo("charset changed from %s to %s", tsCharset, charset);
+            }
+
+            tstrncpy(tsCharset, charset, TSDB_LOCALE_LEN);
+            cfg->cfgStatus = TAOS_CFG_CSTATUS_OPTION;
+
           } else {
-            tscPrint("charset:%s is not valid in locale, charset remains:%s", charset, tsCharset);
+            tscInfo("charset:%s is not valid in locale, charset remains:%s", charset, tsCharset);
           }
+
           free(charset);
-        } else {
-          tscPrint("charset remains:%s", tsCharset);
+        } else { // it may be windows system
+          tscInfo("charset remains:%s", tsCharset);
         }
       } else {
-        tscWarn("config option:%s, input value:%s, is configured by %s, use %s", cfg_locale->option, pStr,
-                tsCfgStatusStr[cfg_locale->cfgStatus], (char *)cfg_locale->ptr);
+        tscWarn("config option:%s, input value:%s, is configured by %s, use %s", cfg->option, pStr,
+                tsCfgStatusStr[cfg->cfgStatus], (char *)cfg->ptr);
       }
       break;
     }
 
     case TSDB_OPTION_CHARSET: {
       /* set charset will override the value of charset, assigned during system locale changed */
-      pStr = (char *)arg;
-
-      char oldCharset[64] = {0};
-      strncpy(oldCharset, tsCharset, tListLen(oldCharset));
-
+      cfg = taosGetConfigOption("charset");
+      assert(cfg != NULL);
+      
       size_t len = strlen(pStr);
       if (len == 0 || len > TSDB_LOCALE_LEN) {
-        tscPrint("Invalid charset:%s, failed to set charset, current charset:%s", pStr, oldCharset);
+        tscInfo("failed to set charset:%s", pStr);
         return -1;
       }
 
-      if (cfg_charset && cfg_charset->cfgStatus <= TSDB_CFG_CSTATUS_OPTION) {
+      if (cfg->cfgStatus <= TAOS_CFG_CSTATUS_OPTION) {
         if (taosValidateEncodec(pStr)) {
-          tscPrint("charset changed from %s to %s", tsCharset, pStr);
-          strncpy(tsCharset, pStr, tListLen(tsCharset));
-          cfg_charset->cfgStatus = TSDB_CFG_CSTATUS_OPTION;
+          if (strlen(tsCharset) == 0) {
+            tscInfo("charset is set:%s", pStr);
+          } else {
+            tscInfo("charset changed from %s to %s", tsCharset, pStr);
+          }
+
+          tstrncpy(tsCharset, pStr, TSDB_LOCALE_LEN);
+          cfg->cfgStatus = TAOS_CFG_CSTATUS_OPTION;
         } else {
-          tscPrint("charset:%s is not valid, charset remains:%s", pStr, tsCharset);
+          tscInfo("charset:%s not valid", pStr);
         }
       } else {
-        tscWarn("config option:%s, input value:%s, is configured by %s, use %s", cfg_charset->option, pStr,
-                tsCfgStatusStr[cfg_charset->cfgStatus], (char *)cfg_charset->ptr);
+        tscWarn("config option:%s, input value:%s, is configured by %s, use %s", cfg->option, pStr,
+                tsCfgStatusStr[cfg->cfgStatus], (char *)cfg->ptr);
       }
 
       break;
     }
 
     case TSDB_OPTION_TIMEZONE:
-      pStr = (char *)arg;
-      if (cfg_timezone && cfg_timezone->cfgStatus <= TSDB_CFG_CSTATUS_OPTION) {
-        strcpy(tsTimezone, pStr);
+      cfg = taosGetConfigOption("timezone");
+      assert(cfg != NULL);
+    
+      if (cfg->cfgStatus <= TAOS_CFG_CSTATUS_OPTION) {
+        tstrncpy(tsTimezone, pStr, TSDB_TIMEZONE_LEN);
         tsSetTimeZone();
-        cfg_timezone->cfgStatus = TSDB_CFG_CSTATUS_OPTION;
-        tscTrace("timezone set:%s, input:%s by taos_options", tsTimezone, pStr);
+        cfg->cfgStatus = TAOS_CFG_CSTATUS_OPTION;
+        tscDebug("timezone set:%s, input:%s by taos_options", tsTimezone, pStr);
       } else {
-        tscWarn("config option:%s, input value:%s, is configured by %s, use %s", cfg_timezone->option, pStr,
-                tsCfgStatusStr[cfg_timezone->cfgStatus], (char *)cfg_timezone->ptr);
+        tscWarn("config option:%s, input value:%s, is configured by %s, use %s", cfg->option, pStr,
+                tsCfgStatusStr[cfg->cfgStatus], (char *)cfg->ptr);
       }
       break;
+
     default:
+      // TODO return the correct error code to client in the format for taos_errstr()
       tscError("Invalid option %d", option);
       return -1;
   }
 
   return 0;
+}
+
+int taos_options(TSDB_OPTION option, const void *arg, ...) {
+  static int32_t lock = 0;
+
+  for (int i = 1; atomic_val_compare_exchange_32(&lock, 0, 1) != 0; ++i) {
+    if (i % 1000 == 0) {
+      tscInfo("haven't acquire lock after spin %d times.", i);
+      sched_yield();
+    }
+  }
+
+  int ret = taos_options_imp(option, (const char*)arg);
+
+  atomic_store_32(&lock, 0);
+  return ret;
 }

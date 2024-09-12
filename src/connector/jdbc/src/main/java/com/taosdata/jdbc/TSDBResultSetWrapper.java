@@ -23,7 +23,7 @@ import java.util.Calendar;
 import java.util.Map;
 
 /*
- * TDengine only supports a subset of the standard SQL, thus this implemetation of the
+ * TDengine only supports a subset of the standard SQL, thus this implementation of the
  * standard JDBC API contains more or less some adjustments customized for certain
  * compatibility needs.
  */
@@ -1153,11 +1153,11 @@ public class TSDBResultSetWrapper implements ResultSet {
     }
 
     public <T> T getObject(int columnIndex, Class<T> type) throws SQLException {
-        throw new SQLException(TSDBConstants.UNSUPPORT_METHOD_EXCEPTIONZ_MSG);
+        throw TSDBError.createSQLException(TSDBErrorNumbers.ERROR_UNSUPPORTED_METHOD);
     }
 
     public <T> T getObject(String columnLabel, Class<T> type) throws SQLException {
-        throw new SQLException(TSDBConstants.UNSUPPORT_METHOD_EXCEPTIONZ_MSG);
+        throw TSDBError.createSQLException(TSDBErrorNumbers.ERROR_UNSUPPORTED_METHOD);
     }
 
     @Override

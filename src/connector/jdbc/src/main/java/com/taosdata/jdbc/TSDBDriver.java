@@ -1,355 +1,233 @@
-/***************************************************************************
- * Copyright (c) 2019 TAOS Data, Inc. <jhtao@taosdata.com>
- *
- * This program is free software: you can use, redistribute, and/or modify
- * it under the terms of the GNU Affero General Public License, version 3
- * or later ("AGPL"), as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.
- *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program. If not, see <http://www.gnu.org/licenses/>.
- *****************************************************************************/
 package com.taosdata.jdbc;
-
-import org.apache.commons.lang3.StringUtils;
 
 import java.sql.*;
 import java.util.Properties;
+import java.util.StringTokenizer;
 import java.util.logging.Logger;
 
 /**
  * The Java SQL framework allows for multiple database drivers. Each driver
  * should supply a class that implements the Driver interface
- * 
+ *
  * <p>
  * The DriverManager will try to load as many drivers as it can find and then
  * for any given connection request, it will ask each driver in turn to try to
  * connect to the target URL.
- * 
+ *
  * <p>
  * It is strongly recommended that each Driver class should be small and stand
  * alone so that the Driver class can be loaded and queried without bringing in
  * vast quantities of supporting code.
- * 
+ *
  * <p>
  * When a Driver class is loaded, it should create an instance of itself and
  * register it with the DriverManager. This means that a user can load and
  * register a driver by doing Class.forName("foo.bah.Driver")
  */
-public class TSDBDriver implements java.sql.Driver {
+public class TSDBDriver extends AbstractDriver {
 
-	@Deprecated
-	private static final String URL_PREFIX1 = "jdbc:TSDB://";
+    @Deprecated
+    private static final String URL_PREFIX1 = "jdbc:TSDB://";
 
-	private static final String URL_PREFIX = "jdbc:TAOS://";
+    private static final String URL_PREFIX = "jdbc:TAOS://";
 
-	/**
-	 * Key used to retrieve the database value from the properties instance passed
-	 * to the driver.
-	 */
-	public static final String PROPERTY_KEY_DBNAME = "dbname";
-
-	/**
-	 * Key used to retrieve the host value from the properties instance passed to
-	 * the driver.
-	 */
-	public static final String PROPERTY_KEY_HOST = "host";
-	/**
-	 * Key used to retrieve the password value from the properties instance passed
-	 * to the driver.
-	 */
-	public static final String PROPERTY_KEY_PASSWORD = "password";
-
-	/**
-	 * Key used to retrieve the port number value from the properties instance
-	 * passed to the driver.
-	 */
-	public static final String PROPERTY_KEY_PORT = "port";
-
-	/**
-	 * Key used to retrieve the user value from the properties instance passed to
-	 * the driver.
-	 */
-	public static final String PROPERTY_KEY_USER = "user";
-
+    /**
+     * PRODUCT_NAME
+     */
+    public static final String PROPERTY_KEY_PRODUCT_NAME = "productName";
+    /**
+     * Key used to retrieve the host value from the properties instance passed to
+     * the driver.
+     */
+    public static final String PROPERTY_KEY_HOST = "host";
+    /**
+     * Key used to retrieve the port number value from the properties instance
+     * passed to the driver.
+     */
+    public static final String PROPERTY_KEY_PORT = "port";
+    /**
+     * Key used to retrieve the database value from the properties instance passed
+     * to the driver.
+     */
+    public static final String PROPERTY_KEY_DBNAME = "dbname";
+    /**
+     * Key used to retrieve the user value from the properties instance passed to
+     * the driver.
+     */
+    public static final String PROPERTY_KEY_USER = "user";
+    /**
+     * Key used to retrieve the password value from the properties instance passed
+     * to the driver.
+     */
+    public static final String PROPERTY_KEY_PASSWORD = "password";
     /**
      * Key for the configuration file directory of TSDB client in properties instance
      */
     public static final String PROPERTY_KEY_CONFIG_DIR = "cfgdir";
-
     /**
      * Key for the timezone used by the TSDB client in properties instance
      */
     public static final String PROPERTY_KEY_TIME_ZONE = "timezone";
-
     /**
      * Key for the locale used by the TSDB client in properties instance
      */
     public static final String PROPERTY_KEY_LOCALE = "locale";
-
-
     /**
      * Key for the char encoding used by the TSDB client in properties instance
      */
     public static final String PROPERTY_KEY_CHARSET = "charset";
 
-    public static final String PROPERTY_KEY_PROTOCOL = "protocol";
+    /**
+     * fetch data from native function in a batch model
+     */
+    public static final String PROPERTY_KEY_BATCH_LOAD = "batchfetch";
 
-	/**
-	 * Index for port coming out of parseHostPortPair().
-	 */
-	public final static int PORT_NUMBER_INDEX = 1;
+    /**
+     * timestamp format for JDBC-RESTful,should one of the options: string or timestamp or utc
+     */
+    public static final String PROPERTY_KEY_TIMESTAMP_FORMAT = "timestampFormat";
 
-	/**
-	 * Index for host coming out of parseHostPortPair().
-	 */
-	public final static int HOST_NAME_INDEX = 0;
+    /**
+     * continue process commands in executeBatch
+     */
+    public static final String PROPERTY_KEY_BATCH_ERROR_IGNORE = "batchErrorIgnore";
 
-	private TSDBDatabaseMetaData dbMetaData = null;
+    private TSDBDatabaseMetaData dbMetaData = null;
 
-	static {
-		try {
-			java.sql.DriverManager.registerDriver(new TSDBDriver());
-		} catch (SQLException E) {
-			throw new RuntimeException(TSDBConstants.WrapErrMsg("can't register tdengine jdbc driver!"));
-		}
-	}
+    static {
+        try {
+            DriverManager.registerDriver(new TSDBDriver());
+        } catch (SQLException e) {
+            throw TSDBError.createRuntimeException(TSDBErrorNumbers.ERROR_CANNOT_REGISTER_JNI_DRIVER, e);
+        }
+    }
 
-	public Connection connect(String url, Properties info) throws SQLException {
-		if (url == null) {
-			throw new SQLException(TSDBConstants.WrapErrMsg("url is not set!"));
-		}
+    public Connection connect(String url, Properties info) throws SQLException {
+        if (!acceptsURL(url))
+            return null;
 
-		Properties props = null;
+        Properties props = parseURL(url, info);
+        if (props == null) {
+            return null;
+        }
 
-		if ((props = parseURL(url, info)) == null) {
-			return null;
-		}
+        if (!props.containsKey(TSDBDriver.PROPERTY_KEY_USER))
+            throw TSDBError.createSQLException(TSDBErrorNumbers.ERROR_USER_IS_REQUIRED);
+        if (!props.containsKey(TSDBDriver.PROPERTY_KEY_PASSWORD))
+            throw TSDBError.createSQLException(TSDBErrorNumbers.ERROR_PASSWORD_IS_REQUIRED);
 
-		try {
-			TSDBJNIConnector.init((String) props.get(PROPERTY_KEY_CONFIG_DIR), (String) props.get(PROPERTY_KEY_LOCALE), (String) props.get(PROPERTY_KEY_CHARSET),
-					(String) props.get(PROPERTY_KEY_TIME_ZONE));
-			Connection newConn = new TSDBConnection(props, this.dbMetaData);
-			return newConn;
-		} catch (SQLWarning sqlWarning) {
-			sqlWarning.printStackTrace();
-			Connection newConn = new TSDBConnection(props, this.dbMetaData);
-			return newConn;
-		} catch (SQLException sqlEx) {
-			throw sqlEx;
-		} catch (Exception ex) {
-			SQLException sqlEx = new SQLException("SQLException:" + ex.toString());
-			sqlEx.initCause(ex);
-			throw sqlEx;
-		}
-	}
+        try {
+            TSDBJNIConnector.init(props);
+            return new TSDBConnection(props, this.dbMetaData);
+        } catch (SQLWarning sqlWarning) {
+            return new TSDBConnection(props, this.dbMetaData);
+        } catch (SQLException sqlEx) {
+            throw sqlEx;
+        } catch (Exception ex) {
+            throw new SQLException("SQLException:" + ex, ex);
+        }
+    }
 
-	/**
-	 * Parses hostPortPair in the form of [host][:port] into an array, with the
-	 * element of index HOST_NAME_INDEX being the host (or null if not specified),
-	 * and the element of index PORT_NUMBER_INDEX being the port (or null if not
-	 * specified).
-	 * 
-	 * @param hostPortPair
-	 *            host and port in form of of [host][:port]
-	 * 
-	 * @return array containing host and port as Strings
-	 * 
-	 * @throws SQLException
-	 *             if a parse error occurs
-	 */
-	protected static String[] parseHostPortPair(String hostPortPair) throws SQLException {
-		String[] splitValues = new String[2];
+    /**
+     * @param url the URL of the database
+     * @return <code>true</code> if this driver understands the given URL;
+     * <code>false</code> otherwise
+     * @throws SQLException if a database access error occurs or the url is {@code null}
+     */
+    public boolean acceptsURL(String url) throws SQLException {
+        if (url == null)
+            throw TSDBError.createSQLException(TSDBErrorNumbers.ERROR_URL_NOT_SET);
+        return url.trim().length() > 0 && (url.startsWith(URL_PREFIX) || url.startsWith(URL_PREFIX1));
+    }
 
-		int portIndex = hostPortPair.indexOf(":");
+    public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) throws SQLException {
+        if (info == null) {
+            info = new Properties();
+        }
 
-		String hostname = null;
+        if (acceptsURL(url)) {
+            info = parseURL(url, info);
+        }
 
-		if (portIndex != -1) {
-			if ((portIndex + 1) < hostPortPair.length()) {
-				String portAsString = hostPortPair.substring(portIndex + 1);
-				hostname = hostPortPair.substring(0, portIndex);
+        return getPropertyInfo(info);
+    }
 
-				splitValues[HOST_NAME_INDEX] = hostname;
+    /**
+     * example: jdbc:TAOS://127.0.0.1:0/db?user=root&password=your_password
+     */
+    @Override
+    public Properties parseURL(String url, Properties defaults) {
+        Properties urlProps = (defaults != null) ? defaults : new Properties();
+        if (url == null || url.length() <= 0 || url.trim().length() <= 0)
+            return null;
+        if (!url.startsWith(URL_PREFIX) && !url.startsWith(URL_PREFIX1))
+            return null;
 
-				splitValues[PORT_NUMBER_INDEX] = portAsString;
-			} else {
-				throw new SQLException(TSDBConstants.WrapErrMsg("port is not proper!"));
-			}
-		} else {
-			splitValues[HOST_NAME_INDEX] = hostPortPair;
-			splitValues[PORT_NUMBER_INDEX] = null;
-		}
+        // parse properties
+        String urlForMeta = url;
+        int beginningOfSlashes = url.indexOf("//");
+        int index = url.indexOf("?");
+        if (index != -1) {
+            String paramString = url.substring(index + 1);
+            url = url.substring(0, index);
+            StringTokenizer queryParams = new StringTokenizer(paramString, "&");
+            while (queryParams.hasMoreElements()) {
+                String oneToken = queryParams.nextToken();
+                String[] pair = oneToken.split("=");
 
-		return splitValues;
-	}
+                if ((pair[0] != null && pair[0].trim().length() > 0) && (pair[1] != null && pair[1].trim().length() > 0)) {
+                    urlProps.setProperty(pair[0].trim(), pair[1].trim());
+                }
+            }
+        }
 
-	public boolean acceptsURL(String url) throws SQLException {
-		return true;
-	}
+        // parse Product Name
+        String dbProductName = url.substring(0, beginningOfSlashes);
+        dbProductName = dbProductName.substring(dbProductName.indexOf(":") + 1);
+        dbProductName = dbProductName.substring(0, dbProductName.indexOf(":"));
+        urlProps.setProperty(TSDBDriver.PROPERTY_KEY_PRODUCT_NAME, dbProductName);
 
-	public DriverPropertyInfo[] getPropertyInfo(String url, Properties info) throws SQLException {
-		if (info == null) {
-			info = new Properties();
-		}
+        // parse database name
+        url = url.substring(beginningOfSlashes + 2);
+        int indexOfSlash = url.indexOf("/");
+        if (indexOfSlash != -1) {
+            if (indexOfSlash + 1 < url.length()) {
+                urlProps.setProperty(TSDBDriver.PROPERTY_KEY_DBNAME, url.substring(indexOfSlash + 1));
+            }
+            url = url.substring(0, indexOfSlash);
+        }
 
-		if ((url != null) && (url.startsWith(URL_PREFIX) || url.startsWith(URL_PREFIX1))) {
-			info = parseURL(url, info);
-		}
+        // parse port
+        int indexOfColon = url.indexOf(":");
+        if (indexOfColon != -1) {
+            if (indexOfColon + 1 < url.length()) {
+                urlProps.setProperty(TSDBDriver.PROPERTY_KEY_PORT, url.substring(indexOfColon + 1));
+            }
+            url = url.substring(0, indexOfColon);
+        }
 
-		DriverPropertyInfo hostProp = new DriverPropertyInfo(PROPERTY_KEY_HOST, info.getProperty(PROPERTY_KEY_HOST));
-		hostProp.required = true;
+        if (url.length() > 0 && url.trim().length() > 0) {
+            urlProps.setProperty(TSDBDriver.PROPERTY_KEY_HOST, url);
+        }
 
-		DriverPropertyInfo portProp = new DriverPropertyInfo(PROPERTY_KEY_PORT,
-				info.getProperty(PROPERTY_KEY_PORT, TSDBConstants.DEFAULT_PORT));
-		portProp.required = false;
+        this.dbMetaData = new TSDBDatabaseMetaData(urlForMeta, urlProps.getProperty(TSDBDriver.PROPERTY_KEY_USER));
+        return urlProps;
+    }
 
-		DriverPropertyInfo dbProp = new DriverPropertyInfo(PROPERTY_KEY_DBNAME, info.getProperty(PROPERTY_KEY_DBNAME));
-		dbProp.required = false;
-		dbProp.description = "Database name";
+    public int getMajorVersion() {
+        return 2;
+    }
 
-		DriverPropertyInfo userProp = new DriverPropertyInfo(PROPERTY_KEY_USER, info.getProperty(PROPERTY_KEY_USER));
-		userProp.required = true;
+    public int getMinorVersion() {
+        return 0;
+    }
 
-		DriverPropertyInfo passwordProp = new DriverPropertyInfo(PROPERTY_KEY_PASSWORD,
-				info.getProperty(PROPERTY_KEY_PASSWORD));
-		passwordProp.required = true;
+    public boolean jdbcCompliant() {
+        return false;
+    }
 
-		DriverPropertyInfo[] propertyInfo = new DriverPropertyInfo[5];
-		propertyInfo[0] = hostProp;
-		propertyInfo[1] = portProp;
-		propertyInfo[2] = dbProp;
-		propertyInfo[3] = userProp;
-		propertyInfo[4] = passwordProp;
+    public Logger getParentLogger() {
+        return null;
+    }
 
-		return propertyInfo;
-	}
-
-	/**
-	 * example: jdbc:TSDB://127.0.0.1:0/db?user=root&password=your_password
-	 */
-
-	public Properties parseURL(String url, Properties defaults) throws java.sql.SQLException {
-		Properties urlProps = (defaults != null) ? defaults : new Properties();
-		if (url == null) {
-			return null;
-		}
-
-		if (!StringUtils.startsWithIgnoreCase(url, URL_PREFIX) && !StringUtils.startsWithIgnoreCase(url, URL_PREFIX1)) {
-			return null;
-		}
-
-		String urlForMeta = url;
-
-		String dbProductName = url.substring(url.indexOf(":") + 1);
-		dbProductName = dbProductName.substring(0, dbProductName.indexOf(":"));
-		int beginningOfSlashes = url.indexOf("//");
-		url = url.substring(beginningOfSlashes + 2);
-
-		String host = url.substring(0, url.indexOf(":"));
-		url = url.substring(url.indexOf(":") + 1);
-		urlProps.setProperty(PROPERTY_KEY_HOST, host);
-
-		String port = url.substring(0, url.indexOf("/"));
-		urlProps.setProperty(PROPERTY_KEY_PORT, port);
-		url = url.substring(url.indexOf("/") + 1);
-
-		if (url.indexOf("?") != -1) {
-			String dbName = url.substring(0, url.indexOf("?"));
-			urlProps.setProperty(PROPERTY_KEY_DBNAME, dbName);
-			url = url.trim().substring(1);
-		} else {
-			// without user & password so return
-			String dbName = url.trim();
-			urlProps.setProperty(PROPERTY_KEY_DBNAME, dbName);
-			this.dbMetaData = new TSDBDatabaseMetaData(dbProductName, urlForMeta, urlProps.getProperty("user"));
-			return urlProps;
-		}
-
-		String[] queryStrings = url.trim().split("&");
-		String user = "";
-		for (String queryStr : queryStrings) {
-			String[] kvPair = queryStr.trim().split("=");
-			switch (kvPair[0].toLowerCase()) {
-				case PROPERTY_KEY_USER:
-					urlProps.setProperty(PROPERTY_KEY_USER, kvPair[1]);
-					user = kvPair[1];
-					break;
-				case PROPERTY_KEY_PASSWORD:
-					urlProps.setProperty(PROPERTY_KEY_PASSWORD, kvPair[1]);
-					break;
-                case PROPERTY_KEY_TIME_ZONE:
-                    urlProps.setProperty(PROPERTY_KEY_TIME_ZONE, kvPair[1]);
-                    break;
-                case PROPERTY_KEY_LOCALE:
-                    urlProps.setProperty(PROPERTY_KEY_LOCALE, kvPair[1]);
-                    break;
-                case PROPERTY_KEY_CHARSET:
-                    urlProps.setProperty(PROPERTY_KEY_CHARSET, kvPair[1]);
-                    break;
-                case PROPERTY_KEY_CONFIG_DIR:
-                    urlProps.setProperty(PROPERTY_KEY_CONFIG_DIR, kvPair[1]);
-                    break;
-			}
-		}
-
-		this.dbMetaData = new TSDBDatabaseMetaData(dbProductName, urlForMeta, user);
-
-		return urlProps;
-	}
-
-	public int getMajorVersion() {
-		return 1;
-	}
-
-	public int getMinorVersion() {
-		return 1;
-	}
-
-	public boolean jdbcCompliant() {
-		return false;
-	}
-
-	public Logger getParentLogger() throws SQLFeatureNotSupportedException {
-		return null;
-	}
-
-	/**
-	 * Returns the host property
-	 * 
-	 * @param props
-	 *            the java.util.Properties instance to retrieve the hostname from.
-	 * 
-	 * @return the host
-	 */
-	public String host(Properties props) {
-		return props.getProperty(PROPERTY_KEY_HOST, "localhost");
-	}
-
-	/**
-	 * Returns the port number property
-	 * 
-	 * @param props
-	 *            the properties to get the port number from
-	 * 
-	 * @return the port number
-	 */
-	public int port(Properties props) {
-		return Integer.parseInt(props.getProperty(PROPERTY_KEY_PORT, TSDBConstants.DEFAULT_PORT));
-	}
-
-	/**
-	 * Returns the database property from <code>props</code>
-	 * 
-	 * @param props
-	 *            the Properties to look for the database property.
-	 * 
-	 * @return the database name.
-	 */
-	public String database(Properties props) {
-		return props.getProperty(PROPERTY_KEY_DBNAME);
-	}
 }

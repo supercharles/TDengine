@@ -11,6 +11,22 @@ extern "C" {
 #define com_taosdata_jdbc_TSDBJNIConnector_INVALID_CONNECTION_POINTER_VALUE 0LL
 /*
  * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    
+ * Signature: (Ljava/lang/String;)V
+ */
+JNIEXPORT void JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_setAllocModeImp
+  (JNIEnv *, jclass, jint, jstring, jboolean);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    
+ * Signature: ()Ljava/lang/String;
+ */
+JNIEXPORT void JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_dumpMemoryLeakImp
+  (JNIEnv *, jclass);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
  * Method:    initImp
  * Signature: (Ljava/lang/String;)V
  */
@@ -27,11 +43,27 @@ JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_setOptions
 
 /*
  * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    setConfigImp
+ * Signature: (Ljava/lang/String;)Lcom/taosdata/jdbc/TSDBException;
+ */
+JNIEXPORT jobject JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_setConfigImp
+  (JNIEnv *, jclass, jstring);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
  * Method:    getTsCharset
  * Signature: ()Ljava/lang/String;
  */
 JNIEXPORT jstring JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_getTsCharset
   (JNIEnv *, jclass);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    getResultTimePrecisionImp
+ * Signature: (JJ)I
+ */
+JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TDDBJNIConnector_getResultTimePrecisionImp
+        (JNIEnv *, jobject, jlong, jlong);
 
 /*
  * Class:     com_taosdata_jdbc_TSDBJNIConnector
@@ -46,7 +78,7 @@ JNIEXPORT jlong JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_connectImp
  * Method:    executeQueryImp
  * Signature: ([BJ)I
  */
-JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_executeQueryImp
+JNIEXPORT jlong JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_executeQueryImp
   (JNIEnv *, jobject, jbyteArray, jlong);
 
 /*
@@ -55,7 +87,7 @@ JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_executeQueryImp
  * Signature: (J)I
  */
 JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_getErrCodeImp
-  (JNIEnv *, jobject, jlong);
+  (JNIEnv *, jobject, jlong, jlong);
 
 /*
  * Class:     com_taosdata_jdbc_TSDBJNIConnector
@@ -71,7 +103,15 @@ JNIEXPORT jstring JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_getErrMsgImp
  * Signature: (J)J
  */
 JNIEXPORT jlong JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_getResultSetImp
-  (JNIEnv *, jobject, jlong);
+  (JNIEnv *env, jobject jobj, jlong con, jlong tres);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    isUpdateQueryImp
+ * Signature: (JJ)I
+ */
+JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_isUpdateQueryImp
+  (JNIEnv *env, jobject jobj, jlong con, jlong tres);
 
 /*
  * Class:     com_taosdata_jdbc_TSDBJNIConnector
@@ -87,7 +127,7 @@ JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_freeResultSetImp
  * Signature: (J)I
  */
 JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_getAffectedRowsImp
-  (JNIEnv *, jobject, jlong);
+  (JNIEnv *env, jobject jobj, jlong con, jlong res);
 
 /*
  * Class:     com_taosdata_jdbc_TSDBJNIConnector
@@ -107,6 +147,14 @@ JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_fetchRowImp
 
 /*
  * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    fetchBlockImp
+ * Signature: (JJLcom/taosdata/jdbc/TSDBResultSetBlockData;)I
+ */
+JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_fetchBlockImp
+  (JNIEnv *, jobject, jlong, jlong, jobject);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
  * Method:    closeConnectionImp
  * Signature: (J)I
  */
@@ -119,14 +167,14 @@ JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_closeConnectionIm
  * Signature: (Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;JI)J
  */
 JNIEXPORT jlong JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_subscribeImp
-  (JNIEnv *, jobject, jstring, jstring, jstring, jstring, jstring, jlong, jint);
+  (JNIEnv *, jobject, jlong, jboolean, jstring, jstring, jint);
 
 /*
  * Class:     com_taosdata_jdbc_TSDBJNIConnector
  * Method:    consumeImp
  * Signature: (J)Lcom/taosdata/jdbc/TSDBResultSetRowData;
  */
-JNIEXPORT jobject JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_consumeImp
+JNIEXPORT jlong JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_consumeImp
   (JNIEnv *, jobject, jlong);
 
 /*
@@ -135,7 +183,7 @@ JNIEXPORT jobject JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_consumeImp
  * Signature: (J)V
  */
 JNIEXPORT void JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_unsubscribeImp
-  (JNIEnv *, jobject, jlong);
+  (JNIEnv *, jobject, jlong, jboolean);
 
 /*
  * Class:     com_taosdata_jdbc_TSDBJNIConnector
@@ -144,6 +192,76 @@ JNIEXPORT void JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_unsubscribeImp
  */
 JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_validateCreateTableSqlImp
   (JNIEnv *, jobject, jlong, jbyteArray);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    prepareStmtImp
+ * Signature: ([BJ)I
+ */
+JNIEXPORT jlong JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_prepareStmtImp
+  (JNIEnv *, jobject, jbyteArray, jlong);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    setBindTableNameImp
+ * Signature: (JLjava/lang/String;J)I
+ */
+JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_setBindTableNameImp
+  (JNIEnv *, jobject, jlong, jstring, jlong);
+
+
+/**
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    setTableNameTagsImp
+ * Signature: (JLjava/lang/String;I[B[B[B[BJ)I
+ */
+JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_setTableNameTagsImp
+    (JNIEnv *, jobject, jlong, jstring, jint, jbyteArray, jbyteArray, jbyteArray, jbyteArray, jlong);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    bindColDataImp
+ * Signature: (J[B[B[BIIIIJ)J
+ */
+JNIEXPORT jlong JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_bindColDataImp
+(JNIEnv *, jobject, jlong, jbyteArray, jbyteArray, jbyteArray, jint, jint, jint, jint, jlong);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    stmt_add_batch
+ * Signature: (JJ)I
+ */
+JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_addBatchImp(JNIEnv *env, jobject jobj, jlong stmt, jlong con);
+
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    executeBatchImp
+ * Signature: (JJ)I
+ */
+JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_executeBatchImp(JNIEnv *env, jobject jobj, jlong stmt, jlong con);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    closeStmt
+ * Signature: (JJ)I
+ */
+JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_closeStmt(JNIEnv *env, jobject jobj, jlong stmt, jlong con);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    stmt_errstr
+ * Signature: (JJ)I
+ */
+JNIEXPORT jstring JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_stmtErrorMsgImp(JNIEnv *env, jobject jobj, jlong stmt, jlong con);
+
+/*
+ * Class:     com_taosdata_jdbc_TSDBJNIConnector
+ * Method:    insertLinesImp
+ * Signature: ([Ljava/lang/String;JII)I
+ */
+JNIEXPORT jint JNICALL Java_com_taosdata_jdbc_TSDBJNIConnector_insertLinesImp
+  (JNIEnv *, jobject, jobjectArray, jlong, jint, jint);
 
 #ifdef __cplusplus
 }
